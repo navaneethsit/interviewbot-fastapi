@@ -15,6 +15,10 @@ app = FastAPI()
 class TextRequest(BaseModel):
     text: str
 
+@app.get("/")
+def read_root():
+    return {"message": "Welcome to the Interview Bot API"}
+
 @app.post("/ask/")
 async def ask_and_get_audio_response(request: TextRequest):
     try:
