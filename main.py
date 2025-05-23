@@ -23,6 +23,8 @@ async def ask_and_get_audio_response(request: TextRequest):
         model="gpt-3.5-turbo",
         messages=[{"role": "user", "content": request.text}]
     )
+    except openai.error.OpenAIError as e:
+        print("Error calling OpenAI:", e)
 
         answer = chat_response.choices[0].message.content
 
