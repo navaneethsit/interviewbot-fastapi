@@ -1,4 +1,8 @@
 fastapi
-uvicorn[standard]==0.22.0
+uvicorn
+pandas
+openpyxl
+pdfplumber
+python-docx
+docx2txt
 python-dotenv
-openai
