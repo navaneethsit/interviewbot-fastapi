@@ -1,50 +1,89 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from openai import OpenAI
-import io, os
+from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
+import pandas as pd
+import os
+import io
+import pdfplumber
+import docx2txt
 from dotenv import load_dotenv
+import asyncio
+from functools import partial
 
 load_dotenv()
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
 app = FastAPI()
 
-class TextRequest(BaseModel):
-    text: str
+excel_path = "resumes.xlsx"
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB limit
 
-@app.post("/ask/")
-async def ask_and_get_audio_response(request: TextRequest):
+# Ensure Excel file exists
+def ensure_excel_file():
+    if not os.path.exists(excel_path):
+        df = pd.DataFrame(columns=["filename", "content"])
+        df.to_excel(excel_path, index=False)
+
+ensure_excel_file()
+
+# Synchronous PDF extraction
+def extract_text_from_pdf_sync(file):
     try:
-        # Limit response tokens to reduce generation time
-        chat_response = client.chat.completions.create(
-    model="gpt-3.5-turbo",  # Use this if available
-    messages=[
-        {"role": "system", "content": "Answer briefly and professionally."},
-        {"role": "user", "content": request.text}
-    ],
-    max_tokens=50,
-    temperature=0.5
-)
+        with pdfplumber.open(file) as pdf:
+            return "\n".join(page.extract_text() or "" for page in pdf.pages)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error reading PDF: {str(e)}")
 
-        answer = chat_response.choices[0].message.content.strip()
+# Synchronous DOCX extraction
+def extract_text_from_docx_sync(file):
+    try:
+        return docx2txt.process(file)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Error reading DOCX: {str(e)}")
 
-        # Try a faster voice like "echo" or "nova"
-        tts_response = client.audio.speech.create(
-            model="tts-1",
-            voice="echo",  # Try different voices for faster TTS
-            input=answer,
-        )
+# Asynchronous wrappers
+async def extract_text_from_pdf(file: UploadFile):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, partial(extract_text_from_pdf_sync, file.file))
 
-        audio_data = tts_response.read()
-        audio_stream = io.BytesIO(audio_data)
-        audio_stream.seek(0)
+async def extract_text_from_docx(file: UploadFile):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, partial(extract_text_from_docx_sync, file.file))
 
-        return StreamingResponse(
-            audio_stream,
-            media_type="audio/mpeg",
-            headers={"Content-Disposition": "inline; filename=answer.mp3"},
-        )
+# Background task to save to Excel
+def save_to_excel(filename: str, content: str):
+    try:
+        df = pd.read_excel(excel_path)
+        new_row = {"filename": filename, "content": content}
+        df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+        df.to_excel(excel_path, index=False)
+    except Exception as e:
+        # Log error instead of raising, since this runs in the background
+        print(f"Error saving to Excel: {str(e)}")
+
+@app.post("/resumeUpload/")
+async def resume_upload(file: UploadFile = File(...), background_tasks: BackgroundTasks = None):
+    try:
+        # Check file size
+        file_size = 0
+        for chunk in file.file:
+            file_size += len(chunk)
+            if file_size > MAX_FILE_SIZE:
+                raise HTTPException(status_code=400, detail="File size exceeds 10 MB limit")
+
+        # Reset file pointer to start
+        await file.seek(0)
+
+        # Extract content based on file type
+        if file.content_type == "application/pdf":
+            content = await extract_text_from_pdf(file)
+        elif file.content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+            content = await extract_text_from_docx(file)
+        elif file.content_type.startswith("text"):
+            content = (await file.read()).decode("utf-8")
+        else:
+            raise HTTPException(status_code=400, detail="Unsupported file type")
+
+        # Save to Excel in the background
+        background_tasks.add_task(save_to_excel, file.filename, content)
+
+        return {"message": "Resume uploaded and queued for processing"}
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
