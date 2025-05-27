@@ -10,3 +10,6 @@ python-multipart
 gspread 
 google-auth
 sqlalchemy
+database
+asyncio
+functools
